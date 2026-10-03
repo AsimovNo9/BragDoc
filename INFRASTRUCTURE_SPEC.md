@@ -91,7 +91,7 @@ Before the first paying user you can run on free tiers of Vercel (hobby is non-c
 | **staging** | Vercel preview/branch `staging` → `staging.winlog.example` | Supabase project `winlog-staging` | Unlisted/trusted-tester store build or sideloaded zip | Pre-release verification, beta |
 | **prod** | Vercel production → `app.winlog.example` | Supabase project `winlog-prod` | Public store listing | Customers |
 
-Rules: separate Supabase projects (never share a DB across envs), separate Stripe test/live modes, separate Sentry projects, distinct OAuth redirect URIs per extension ID.
+Rules: separate Supabase projects (never share a DB across envs), separate Vercel projects, separate Stripe test/live modes, separate Sentry projects, distinct OAuth redirect URIs per extension ID. The staging and production GitHub Environments must each hold credentials for only their matching projects.
 
 > **Extension ID stability:** Chrome extension IDs differ between unpacked, staging and published builds unless you set a `key` in the manifest. Fix the key early so OAuth redirect URIs (`https://<ext-id>.chromiumapp.org/`) stay stable.
 
@@ -109,14 +109,13 @@ Rules: separate Supabase projects (never share a DB across envs), separate Strip
 ### 4.2 Supabase (database + auth)
 
 ```bash
-npm i -g supabase
-supabase login
-supabase init                                   # creates supabase/ if absent
+pnpm dlx supabase@2.119.0 start                 # Docker must be running
+pnpm dlx supabase@2.119.0 status
 
 # Create two projects in the dashboard (region: London / eu-west-2):
 #   winlog-staging, winlog-prod
-supabase link --project-ref <STAGING_REF>
-supabase db push                                # applies supabase/migrations/*.sql
+pnpm dlx supabase@2.119.0 link --project-ref <STAGING_REF>
+pnpm dlx supabase@2.119.0 db push               # applies supabase/migrations/*.sql
 
 # Auth settings (dashboard → Authentication):
 #   - Site URL: https://app.winlog.example   (staging: https://staging.winlog.example)
@@ -125,7 +124,7 @@ supabase db push                                # applies supabase/migrations/*.
 #   - Enable PKCE flow; disable sign-ups you don't want
 
 # Run RLS tests locally and in CI:
-supabase test db
+pnpm dlx supabase@2.119.0 test db
 ```
 
 Checklist: RLS enabled on every table (CI test fails if any table in `public` lacks it); service-role key copied **only** to Vercel server env; daily backup confirmed on the Pro plan.
@@ -146,7 +145,20 @@ vercel env add SENTRY_DSN production
 # repeat for preview/staging with staging values
 ```
 
-Set the function region to London (`lhr1`) so API ↔ Supabase latency stays in single-digit ms. Add `app.winlog.example` as the production domain; Cloudflare record = DNS-only or proxied per Vercel's guidance.
+Set the function region to London (`lhr1`) so API ↔ Supabase latency stays in single-digit ms. Add `app.winlog.example` as the production domain; Cloudflare record = DNS-only or proxied per Vercel's guidance. Create separate staging and production Vercel projects and configure each project's own environment values:
+
+| Variable | Scope |
+|----------|-------|
+| `NEXT_PUBLIC_SITE_URL` | Public origin for this environment |
+| `NEXT_PUBLIC_SUPABASE_URL` | Supabase URL for this environment |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase anon key for this environment |
+| `SUPABASE_SERVICE_ROLE_KEY` | Server-only Supabase key; never expose to the browser |
+| `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | Environment-matched Stripe test/live credentials |
+| `RESEND_API_KEY` | Environment-matched email provider key |
+| `ADAPTER_CONFIG_SIGNING_KEY` | Server-only signing key; never expose to the browser |
+| `SENTRY_DSN` | Environment-specific error reporting project |
+
+Only configure optional integration variables when that integration is enabled. Never copy staging values into production or commit any of these values.
 
 ### 4.4 Cloudflare R2 (model mirror + signed config)
 
@@ -187,6 +199,33 @@ The config contains selectors and heuristic keyword lists (data only). The exten
 ---
 
 ## 5. CI/CD
+
+Create GitHub Environments named `staging` and `production`. Configure the
+production environment with at least one required reviewer; the workflow's
+`environment: production` declaration pauses that job until approval. Add the
+following secrets to each environment, using distinct project credentials:
+
+| Secret | Purpose |
+|--------|---------|
+| `SUPABASE_ACCESS_TOKEN` | Dedicated CI token for Supabase CLI access |
+| `SUPABASE_PROJECT_REF` | Supabase project reference for this environment |
+| `SUPABASE_DB_PASSWORD` | Database password for this environment |
+| `VERCEL_TOKEN` | Deployment token with access to this environment's Vercel project |
+| `VERCEL_ORG_ID` | Vercel team or account ID |
+| `VERCEL_PROJECT_ID` | This environment's Vercel project ID |
+
+Keep Vercel project environment variables configured in Vercel rather than
+committing values here. Configure the Supabase Site URL and allowed redirect
+URLs separately in each Supabase project's Auth settings: staging URLs must
+point only to staging, and production URLs only to production. Local development
+uses `http://localhost:3000/auth/callback`.
+
+`.github/workflows/deploy-web.yml` runs on pushes to `main` (or manually). It
+builds the web app, applies migrations, then deploys to staging. Production
+depends on staging succeeding and runs the same migration-before-deploy sequence
+after the production environment approval. The workflow pins Node, pnpm,
+Supabase CLI, and Vercel CLI versions; a failed build or migration stops that
+environment's deployment.
 
 ```mermaid
 flowchart LR
